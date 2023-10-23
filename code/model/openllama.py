@@ -19,9 +19,7 @@ class StoppingCriteriaSub(StoppingCriteria):
         stop_count = 0
         for stop in self.stops:
             stop_count = (stop == input_ids[0]).sum().item()
-        if stop_count >= self.ENCOUNTERS:
-            return True
-        return False
+        return stop_count >= self.ENCOUNTERS
 
 def build_one_instance(tokenizer, conversation):
     text_list = []
@@ -36,19 +34,18 @@ def build_one_instance(tokenizer, conversation):
             one_input_id = tokenizer(text, add_special_tokens=False).input_ids
             input_ids += one_input_id
             target_ids += [-100]*len(one_input_id) # do not perform loss regression on human prompt
+        elif role == 'gpt':
+            text = turn['value'] + '\n###'
+            one_input_id = tokenizer(text, add_special_tokens=False).input_ids
+            input_ids += one_input_id
+            target_ids += one_input_id
+        elif role == 'human':
+            text = 'Human: ' + turn['value'] + '\n### Assistant:'
+            one_input_id = tokenizer(text, add_special_tokens=False).input_ids
+            input_ids += one_input_id
+            target_ids += [-100]*len(one_input_id)
         else:
-            if role == 'human':
-                text = 'Human: ' + turn['value'] + '\n### Assistant:'
-                one_input_id = tokenizer(text, add_special_tokens=False).input_ids
-                input_ids += one_input_id
-                target_ids += [-100]*len(one_input_id)
-            elif role == 'gpt':
-                text = turn['value'] + '\n###'
-                one_input_id = tokenizer(text, add_special_tokens=False).input_ids
-                input_ids += one_input_id
-                target_ids += one_input_id
-            else:
-                raise Exception('Wrong Role!!!')
+            raise Exception('Wrong Role!!!')
         text_list.append(text)
         assert len(input_ids) == len(target_ids)
     return text_list, input_ids, target_ids
@@ -234,8 +231,7 @@ class OpenLLAMAPEFTModel(nn.Module):
             thermal_embeds, _ = self.encode_thermal(inputs['thermal_paths'])
             features.append(thermal_embeds)
 
-        feature_embeds = torch.cat(features).sum(dim=0).unsqueeze(0)
-        return feature_embeds
+        return torch.cat(features).sum(dim=0).unsqueeze(0)
 
     def prepare_generation_embedding(self, inputs):
         prompt = inputs['prompt']
@@ -250,15 +246,16 @@ class OpenLLAMAPEFTModel(nn.Module):
         p_before_tokens = self.llama_tokenizer(p_before, 
             return_tensors="pt", add_special_tokens=False).to(self.device)
         p_before_embeds = self.llama_model.model.model.embed_tokens(p_before_tokens.input_ids).expand(batch_size, -1, -1) # bsz x s1 x embed_dim
-        text = '</Img> ' + prompt + '\n### Assistant:'
+        text = f'</Img> {prompt}' + '\n### Assistant:'
         p_after_tokens = self.llama_tokenizer(text, add_special_tokens=False, return_tensors='pt').to(self.device)
         p_after_embeds = self.llama_model.model.model.embed_tokens(p_after_tokens.input_ids).expand(batch_size, -1, -1) # bsz x s1 x embed_dim
         bos = torch.ones([batch_size, 1],
                          dtype=p_before_tokens.input_ids.dtype,
                          device=p_before_tokens.input_ids.device) * self.llama_tokenizer.bos_token_id # bsz x 1
         bos_embeds = self.llama_model.model.model.embed_tokens(bos) # bsz x 1 x embed_dim
-        inputs_embeds = torch.cat([bos_embeds, p_before_embeds, feature_embeds, p_after_embeds], dim=1) # bsz x (1+s1+1+s2) x embed_dim
-        return inputs_embeds
+        return torch.cat(
+            [bos_embeds, p_before_embeds, feature_embeds, p_after_embeds], dim=1
+        )
 
     def generate(self, inputs):
         '''
@@ -287,6 +284,5 @@ class OpenLLAMAPEFTModel(nn.Module):
             use_cache=True,
             stopping_criteria=stopping_criteria,
         )
-        output_text = self.llama_tokenizer.decode(outputs[0][:-2], skip_special_tokens=True)
-        return output_text
+        return self.llama_tokenizer.decode(outputs[0][:-2], skip_special_tokens=True)
 
